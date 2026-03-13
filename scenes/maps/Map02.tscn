@@ -1,0 +1,19 @@
+[gd_scene load_steps=3 format=3]
+
+[sub_resource type="BoxMesh" id="1"]
+size = Vector3(50, 1, 50)
+
+[sub_resource type="BoxMesh" id="2"]
+size = Vector3(4, 4, 4)
+
+[node name="Map02" type="Node3D"]
+
+[node name="Ground" type="MeshInstance3D" parent="."]
+mesh = SubResource("1")
+
+[node name="Obstacle" type="MeshInstance3D" parent="."]
+position = Vector3(2, 2, -3)
+mesh = SubResource("2")
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+rotation = Vector3(-0.9, 0.0, 0.0)
