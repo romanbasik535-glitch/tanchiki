@@ -1,0 +1,728 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover" />
+  <title>2D Танки</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; touch-action: none; user-select: none; }
+    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #111; font-family: system-ui, Arial, sans-serif; }
+    #game { width: 100vw; height: 100vh; display: block; }
+
+    .overlay {
+      position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+      background: rgba(0,0,0,.72); z-index: 30;
+    }
+    .panel {
+      width: min(92vw, 720px); background: rgba(17,20,25,.96); border: 2px solid #3a4b5b; border-radius: 14px;
+      padding: 16px; box-shadow: 0 0 24px rgba(0,0,0,.55);
+    }
+    h1, h2 { margin: 6px 0 12px; text-align: center; }
+    .btn-grid { display: grid; gap: 10px; grid-template-columns: 1fr; }
+    button, .option {
+      width: 100%; border: 0; border-radius: 10px; padding: 12px 14px; font-size: 18px;
+      background: #223240; color: #e8f0ff; font-weight: 700;
+    }
+    button:active { transform: scale(.98); }
+    .row { display: flex; gap: 10px; margin-bottom: 10px; align-items: center; }
+    .row > * { flex: 1; }
+    .small { font-size: 14px; color: #b4c8d8; text-align: center; }
+    #rotateLock { z-index: 40; }
+
+    @media (orientation: portrait) {
+      #rotateLock { display: flex; }
+    }
+    @media (orientation: landscape) {
+      #rotateLock { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <canvas id="game"></canvas>
+
+  <div id="rotateLock" class="overlay">
+    <div class="panel"><h2>Поверніть телефон</h2><p class="small">Гра працює тільки в альбомному режимі.</p></div>
+  </div>
+
+  <div id="ui" class="overlay">
+    <div class="panel" id="menuPanel"></div>
+  </div>
+
+<script>
+(() => {
+  'use strict';
+
+  // ---------------- Constants ----------------
+  const C = {
+    tile: 48,
+    maxTouches: 8,
+    tankSize: 30,
+    tankHp: 100,
+    tankSpeed: 160,
+    turnSpeed: 8,
+    bulletSpeed: 440,
+    bulletLife: 1.9,
+    bulletDamage: 25,
+    fireCooldown: 0.34,
+    colors: {
+      bg: '#1a232d',
+      floor: '#26323d',
+      wall: '#8b5a3c',
+      concrete: '#88919b',
+      p1: '#32cc62',
+      p2: '#3f87ff',
+      enemy: '#ef4a4a',
+      bullet: '#ffe082',
+      hud: '#e8f0ff'
+    },
+    ai: {
+      easy: { speedMul: 0.8, fireMul: 1.3, aimJitter: 0.22 },
+      normal: { speedMul: 1.0, fireMul: 1.0, aimJitter: 0.12 },
+      hard: { speedMul: 1.15, fireMul: 0.8, aimJitter: 0.05 }
+    }
+  };
+
+  const MAPS = [
+    {
+      name: 'Лабіринт',
+      data: [
+        '####################',
+        '#....b....#....b...#',
+        '#.####.##.#.##.###.#',
+        '#.#..#....#....#...#',
+        '#.#.#####.####.#.###',
+        '#.#.....#....#.#...#',
+        '#.#####.####.#.###.#',
+        '#...#...#..#.#...#.#',
+        '###.#.###..#.###.#.#',
+        '#...#....bb#.....#.#',
+        '#.#######..#####.#.#',
+        '####################'
+      ]
+    },
+    {
+      name: 'Арена',
+      data: [
+        '####################',
+        '#..................#',
+        '#....bb......bb....#',
+        '#..................#',
+        '#......######......#',
+        '#..................#',
+        '#..###........###..#',
+        '#..................#',
+        '#....bb......bb....#',
+        '#..................#',
+        '#..................#',
+        '####################'
+      ]
+    }
+  ];
+
+  // ---------------- Canvas ----------------
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  let vw = 1, vh = 1;
+  function resize() {
+    vw = canvas.width = Math.max(1, window.innerWidth);
+    vh = canvas.height = Math.max(1, window.innerHeight);
+  }
+  window.addEventListener('resize', resize, { passive: true });
+  resize();
+
+  // ---------------- UI State ----------------
+  const overlay = document.getElementById('ui');
+  const menuPanel = document.getElementById('menuPanel');
+
+  const S = {
+    state: 'menu', // menu, map, settings, playing, paused, result
+    mode: 'single',
+    mapIndex: 0,
+    sound: true,
+    aiLevel: 'normal',
+    resultText: '',
+    world: null
+  };
+
+  function setPanel(html, bind) {
+    menuPanel.innerHTML = html;
+    if (bind) bind();
+  }
+
+  function showMenu() {
+    S.state = 'menu'; overlay.style.display = 'flex';
+    setPanel(`
+      <h1>2D Танки</h1>
+      <div class="btn-grid">
+        <button id="singleBtn">Один гравець</button>
+        <button id="duoBtn">Два гравці (1 екран)</button>
+        <button id="settingsBtn">Налаштування</button>
+      </div>
+      <p class="small">Мультитач підтримує 4+ одночасних торкання.</p>
+    `, () => {
+      byId('singleBtn').onclick = () => { S.mode = 'single'; showMapSelect(); };
+      byId('duoBtn').onclick = () => { S.mode = 'duo'; showMapSelect(); };
+      byId('settingsBtn').onclick = showSettings;
+    });
+  }
+
+  function showMapSelect() {
+    S.state = 'map'; overlay.style.display = 'flex';
+    setPanel(`
+      <h2>Виберіть карту</h2>
+      <div class="btn-grid">
+        <button data-map="0">Карта 1: Лабіринт</button>
+        <button data-map="1">Карта 2: Арена</button>
+        <button id="backBtn">Назад</button>
+      </div>
+    `, () => {
+      menuPanel.querySelectorAll('button[data-map]').forEach(b => b.onclick = () => startGame(+b.dataset.map));
+      byId('backBtn').onclick = showMenu;
+    });
+  }
+
+  function showSettings() {
+    S.state = 'settings'; overlay.style.display = 'flex';
+    setPanel(`
+      <h2>Налаштування</h2>
+      <div class="row"><div class="option">Звук</div><button id="soundBtn"></button></div>
+      <div class="row"><div class="option">Складність ШІ</div><button id="aiBtn"></button></div>
+      <button id="backBtn">Назад</button>
+    `, () => {
+      const refresh = () => {
+        byId('soundBtn').textContent = S.sound ? 'Увімкнено' : 'Вимкнено';
+        byId('aiBtn').textContent = ({ easy:'Легка', normal:'Нормальна', hard:'Складна' })[S.aiLevel];
+      };
+      byId('soundBtn').onclick = () => { S.sound = !S.sound; refresh(); };
+      byId('aiBtn').onclick = () => {
+        S.aiLevel = S.aiLevel === 'easy' ? 'normal' : (S.aiLevel === 'normal' ? 'hard' : 'easy');
+        refresh();
+      };
+      byId('backBtn').onclick = showMenu;
+      refresh();
+    });
+  }
+
+  function showResult(text) {
+    S.state = 'result'; S.resultText = text; overlay.style.display = 'flex';
+    setPanel(`<h2>${text}</h2><button id="menuBtn">В меню</button>`, () => byId('menuBtn').onclick = showMenu);
+  }
+
+  function pauseGame() {
+    if (S.state !== 'playing') return;
+    S.state = 'paused'; overlay.style.display = 'flex';
+    setPanel(`<h2>Пауза</h2><button id="resume">Продовжити</button><button id="menuBtn">В меню</button>`, () => {
+      byId('resume').onclick = () => { S.state = 'playing'; overlay.style.display = 'none'; };
+      byId('menuBtn').onclick = showMenu;
+    });
+  }
+
+  function byId(id) { return document.getElementById(id); }
+
+  // ---------------- Input Handler ----------------
+  class InputHandler {
+    constructor() {
+      this.controls = {
+        p1: { mx: 0, my: 0, fire: false, joyId: null, fireId: null, jx:0, jy:0 },
+        p2: { mx: 0, my: 0, fire: false, joyId: null, fireId: null, jx:0, jy:0 }
+      };
+      this.pausePressed = false;
+      canvas.addEventListener('pointerdown', this.onDown.bind(this));
+      canvas.addEventListener('pointermove', this.onMove.bind(this));
+      canvas.addEventListener('pointerup', this.onUp.bind(this));
+      canvas.addEventListener('pointercancel', this.onUp.bind(this));
+    }
+
+    reset() {
+      for (const k of ['p1','p2']) {
+        Object.assign(this.controls[k], { mx:0,my:0,fire:false,joyId:null,fireId:null,jx:0,jy:0 });
+      }
+      this.pausePressed = false;
+    }
+
+    getLayout() {
+      const r = Math.min(vw, vh) * 0.13;
+      if (S.mode === 'single') {
+        return {
+          p1Joy: { x: vw * 0.16, y: vh * 0.78, r },
+          p1Fire: { x: vw * 0.86, y: vh * 0.78, r: r * 0.95 },
+          pause: { x: vw - 34, y: 30, r: 24 }
+        };
+      }
+      return {
+        p1Joy: { x: vw * 0.12, y: vh * 0.78, r },
+        p1Fire: { x: vw * 0.33, y: vh * 0.78, r: r * 0.9 },
+        p2Joy: { x: vw * 0.68, y: vh * 0.78, r },
+        p2Fire: { x: vw * 0.88, y: vh * 0.78, r: r * 0.9 },
+        pause: { x: vw - 34, y: 30, r: 24 }
+      };
+    }
+
+    inside(c, x, y, mul = 1) {
+      const dx = x - c.x, dy = y - c.y;
+      return dx*dx + dy*dy <= (c.r * mul) ** 2;
+    }
+
+    setMove(ctrl, x, y, joy) {
+      let dx = x - joy.x, dy = y - joy.y;
+      const len = Math.hypot(dx, dy);
+      if (len < 2) { ctrl.mx = 0; ctrl.my = 0; ctrl.jx = 0; ctrl.jy = 0; return; }
+      const k = Math.min(1, len / joy.r);
+      dx /= len; dy /= len;
+      ctrl.mx = dx * k;
+      ctrl.my = dy * k;
+      ctrl.jx = dx * Math.min(joy.r, len);
+      ctrl.jy = dy * Math.min(joy.r, len);
+    }
+
+    onDown(e) {
+      if (S.state !== 'playing') return;
+      if (e.pointerType === 'touch' || e.pointerType === 'pen' || e.pointerType === 'mouse') {
+        const x = e.clientX, y = e.clientY;
+        const L = this.getLayout();
+        if (this.inside(L.pause, x, y, 1.2)) { this.pausePressed = true; pauseGame(); return; }
+
+        const p1 = this.controls.p1, p2 = this.controls.p2;
+        if (S.mode === 'single') {
+          if (p1.joyId === null && x < vw * 0.5 && this.inside(L.p1Joy, x, y, 1.4)) { p1.joyId = e.pointerId; this.setMove(p1, x, y, L.p1Joy); }
+          else if (p1.fireId === null && x >= vw * 0.5 && this.inside(L.p1Fire, x, y, 1.4)) { p1.fireId = e.pointerId; p1.fire = true; }
+        } else {
+          if (p1.joyId === null && x < vw * 0.5 && this.inside(L.p1Joy, x, y, 1.4)) { p1.joyId = e.pointerId; this.setMove(p1, x, y, L.p1Joy); }
+          else if (p1.fireId === null && x < vw * 0.5 && this.inside(L.p1Fire, x, y, 1.4)) { p1.fireId = e.pointerId; p1.fire = true; }
+          else if (p2.joyId === null && x >= vw * 0.5 && this.inside(L.p2Joy, x, y, 1.4)) { p2.joyId = e.pointerId; this.setMove(p2, x, y, L.p2Joy); }
+          else if (p2.fireId === null && x >= vw * 0.5 && this.inside(L.p2Fire, x, y, 1.4)) { p2.fireId = e.pointerId; p2.fire = true; }
+        }
+      }
+    }
+
+    onMove(e) {
+      if (S.state !== 'playing') return;
+      const x = e.clientX, y = e.clientY;
+      const L = this.getLayout();
+      const p1 = this.controls.p1, p2 = this.controls.p2;
+      if (e.pointerId === p1.joyId) {
+        if (!this.inside(L.p1Joy, x, y, 2.2)) { p1.joyId = null; p1.mx = p1.my = p1.jx = p1.jy = 0; }
+        else this.setMove(p1, x, y, L.p1Joy);
+      }
+      if (S.mode === 'duo' && e.pointerId === p2.joyId) {
+        if (!this.inside(L.p2Joy, x, y, 2.2)) { p2.joyId = null; p2.mx = p2.my = p2.jx = p2.jy = 0; }
+        else this.setMove(p2, x, y, L.p2Joy);
+      }
+    }
+
+    onUp(e) {
+      const p1 = this.controls.p1, p2 = this.controls.p2;
+      if (e.pointerId === p1.joyId) { p1.joyId = null; p1.mx = p1.my = p1.jx = p1.jy = 0; }
+      if (e.pointerId === p1.fireId) { p1.fireId = null; p1.fire = false; }
+      if (e.pointerId === p2.joyId) { p2.joyId = null; p2.mx = p2.my = p2.jx = p2.jy = 0; }
+      if (e.pointerId === p2.fireId) { p2.fireId = null; p2.fire = false; }
+    }
+  }
+
+  const input = new InputHandler();
+
+  // ---------------- Game Objects ----------------
+  class Tank {
+    constructor(x, y, color, team = 'player') {
+      this.x = x; this.y = y;
+      this.size = C.tankSize;
+      this.hp = C.tankHp;
+      this.color = color;
+      this.team = team;
+      this.alive = true;
+      this.rot = -Math.PI/2;
+      this.cool = 0;
+      this.track = 0;
+    }
+    get aabb() {
+      const h = this.size/2;
+      return { x: this.x-h, y: this.y-h, w: this.size, h: this.size };
+    }
+  }
+
+  class Bullet {
+    constructor(x, y, vx, vy, owner) {
+      this.x = x; this.y = y; this.vx = vx; this.vy = vy;
+      this.r = 4; this.owner = owner; this.life = C.bulletLife;
+    }
+  }
+
+  class Particle {
+    constructor(x,y,c) {
+      const a = Math.random()*Math.PI*2;
+      const s = 80 + Math.random()*180;
+      this.x = x; this.y = y; this.vx = Math.cos(a)*s; this.vy = Math.sin(a)*s;
+      this.life = 0.6 + Math.random()*0.6; this.color = c;
+    }
+  }
+
+  // ---------------- World/Map ----------------
+  function buildWorld(mapIndex) {
+    const map = MAPS[mapIndex].data;
+    const cols = map[0].length, rows = map.length;
+    const w = cols * C.tile, h = rows * C.tile;
+    const walls = [];
+    for (let y=0; y<rows; y++) {
+      for (let x=0; x<cols; x++) {
+        const t = map[y][x];
+        if (t === '#' || t === 'b') walls.push({ x:x*C.tile, y:y*C.tile, w:C.tile, h:C.tile, type: t === '#' ? 'concrete' : 'brick', hp: t === 'b' ? 1 : 999 });
+      }
+    }
+
+    const tanks = [];
+    if (S.mode === 'single') {
+      tanks.push(new Tank(C.tile*1.5, C.tile*1.5, C.colors.p1, 'p1'));
+      tanks.push(new Tank(w-C.tile*1.5, h-C.tile*1.5, C.colors.enemy, 'enemy'));
+      tanks.push(new Tank(w-C.tile*1.5, C.tile*1.5, C.colors.enemy, 'enemy'));
+    } else {
+      tanks.push(new Tank(C.tile*1.5, h/2, C.colors.p1, 'p1'));
+      tanks.push(new Tank(w-C.tile*1.5, h/2, C.colors.p2, 'p2'));
+    }
+
+    return { map, cols, rows, w, h, walls, tanks, bullets: [], particles: [] };
+  }
+
+  function startGame(mapIndex) {
+    S.mapIndex = mapIndex;
+    S.world = buildWorld(mapIndex);
+    input.reset();
+    S.state = 'playing';
+    overlay.style.display = 'none';
+  }
+
+  // ---------------- Collision helpers ----------------
+  function overlap(a, b) {
+    return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+  }
+
+  function moveTankWithCollisions(tank, dx, dy, world) {
+    const oldX = tank.x, oldY = tank.y;
+
+    // Axis X move (for wall sliding)
+    tank.x += dx;
+    let box = tank.aabb;
+    for (const w of world.walls) if (overlap(box, w)) { tank.x = oldX; break; }
+    for (const other of world.tanks) {
+      if (!other.alive || other === tank) continue;
+      if (overlap(tank.aabb, other.aabb)) { tank.x = oldX; break; }
+    }
+
+    // Axis Y move
+    tank.y += dy;
+    box = tank.aabb;
+    for (const w of world.walls) if (overlap(box, w)) { tank.y = oldY; break; }
+    for (const other of world.tanks) {
+      if (!other.alive || other === tank) continue;
+      if (overlap(tank.aabb, other.aabb)) { tank.y = oldY; break; }
+    }
+
+    tank.x = clamp(tank.x, tank.size/2, world.w - tank.size/2);
+    tank.y = clamp(tank.y, tank.size/2, world.h - tank.size/2);
+  }
+
+  function fireFromTank(tank, world) {
+    if (tank.cool > 0 || !tank.alive) return;
+    const dirX = Math.cos(tank.rot), dirY = Math.sin(tank.rot);
+    const m = tank.size * 0.58;
+    world.bullets.push(new Bullet(tank.x + dirX*m, tank.y + dirY*m, dirX*C.bulletSpeed, dirY*C.bulletSpeed, tank));
+    tank.cool = C.fireCooldown;
+  }
+
+  // ---------------- Update ----------------
+  function update(dt) {
+    const W = S.world;
+    if (!W || S.state !== 'playing') return;
+
+    const p1 = W.tanks.find(t => t.team === 'p1');
+    const p2 = W.tanks.find(t => t.team === 'p2');
+
+    // Player 1
+    if (p1?.alive) {
+      const c = input.controls.p1;
+      const speed = C.tankSpeed;
+      const mag = Math.hypot(c.mx, c.my);
+      if (mag > 0.02) {
+        const tx = c.mx / mag, ty = c.my / mag;
+        const target = Math.atan2(ty, tx);
+        p1.rot = lerpAngle(p1.rot, target, Math.min(1, C.turnSpeed * dt));
+        moveTankWithCollisions(p1, tx * speed * dt, ty * speed * dt, W);
+        p1.track += dt * 12;
+      }
+      if (c.fire) fireFromTank(p1, W);
+      p1.cool = Math.max(0, p1.cool - dt);
+    }
+
+    // Player 2 (deathmatch)
+    if (S.mode === 'duo' && p2?.alive) {
+      const c = input.controls.p2;
+      const speed = C.tankSpeed;
+      const mag = Math.hypot(c.mx, c.my);
+      if (mag > 0.02) {
+        const tx = c.mx / mag, ty = c.my / mag;
+        const target = Math.atan2(ty, tx);
+        p2.rot = lerpAngle(p2.rot, target, Math.min(1, C.turnSpeed * dt));
+        moveTankWithCollisions(p2, tx * speed * dt, ty * speed * dt, W);
+        p2.track += dt * 12;
+      }
+      if (c.fire) fireFromTank(p2, W);
+      p2.cool = Math.max(0, p2.cool - dt);
+    }
+
+    // AI enemies
+    if (S.mode === 'single' && p1?.alive) {
+      const aicfg = C.ai[S.aiLevel];
+      for (const e of W.tanks) {
+        if (!e.alive || e.team !== 'enemy') continue;
+        const dx = p1.x - e.x, dy = p1.y - e.y;
+        const dist = Math.hypot(dx, dy) || 1;
+        const tx = dx / dist, ty = dy / dist;
+        const desired = Math.atan2(ty, tx) + (Math.random() - 0.5) * aicfg.aimJitter;
+        e.rot = lerpAngle(e.rot, desired, Math.min(1, C.turnSpeed * dt * 0.8));
+        moveTankWithCollisions(e, tx * C.tankSpeed * aicfg.speedMul * dt, ty * C.tankSpeed * aicfg.speedMul * dt, W);
+        e.track += dt * 9;
+        if (dist < 640) {
+          e.cool = Math.max(0, e.cool - dt);
+          if (e.cool <= 0) {
+            fireFromTank(e, W);
+            e.cool += C.fireCooldown * aicfg.fireMul;
+          }
+        }
+      }
+    }
+
+    // Bullets
+    for (let i = W.bullets.length - 1; i >= 0; i--) {
+      const b = W.bullets[i];
+      b.life -= dt;
+      if (b.life <= 0) { W.bullets.splice(i,1); continue; }
+
+      b.x += b.vx * dt;
+      b.y += b.vy * dt;
+      if (b.x < 0 || b.y < 0 || b.x > W.w || b.y > W.h) { W.bullets.splice(i,1); continue; }
+
+      const bb = { x: b.x-b.r, y: b.y-b.r, w: b.r*2, h: b.r*2 };
+      let removed = false;
+
+      // bullet-wall
+      for (let wi = W.walls.length - 1; wi >= 0; wi--) {
+        const w = W.walls[wi];
+        if (!overlap(bb, w)) continue;
+        if (w.type === 'brick') {
+          w.hp -= 1;
+          if (w.hp <= 0) W.walls.splice(wi,1);
+          W.bullets.splice(i,1); removed = true;
+        } else {
+          const cx = w.x + w.w/2, cy = w.y + w.h/2;
+          const dx = b.x - cx, dy = b.y - cy;
+          if (Math.abs(dx) > Math.abs(dy)) b.vx *= -1; else b.vy *= -1;
+          b.life -= 0.35;
+          b.x += b.vx * dt * 0.7; b.y += b.vy * dt * 0.7;
+        }
+        break;
+      }
+      if (removed) continue;
+
+      // bullet-tank
+      for (const t of W.tanks) {
+        if (!t.alive || t === b.owner) continue;
+        if (t.team !== 'enemy' && b.owner.team === t.team) continue;
+        if (overlap(bb, t.aabb)) {
+          t.hp -= C.bulletDamage;
+          W.bullets.splice(i,1);
+          if (t.hp <= 0) {
+            t.alive = false;
+            explode(W, t.x, t.y, t.color);
+          }
+          removed = true;
+          break;
+        }
+      }
+      if (removed) continue;
+    }
+
+    // particles
+    for (let i = W.particles.length - 1; i >= 0; i--) {
+      const p = W.particles[i];
+      p.life -= dt;
+      if (p.life <= 0) { W.particles.splice(i,1); continue; }
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.vx *= 0.96; p.vy *= 0.96;
+    }
+
+    // End conditions
+    if (S.mode === 'single') {
+      const playerAlive = p1 && p1.alive;
+      const enemiesAlive = W.tanks.some(t => t.alive && t.team === 'enemy');
+      if (!playerAlive) showResult('Поразка');
+      else if (!enemiesAlive) showResult('Перемога');
+    } else {
+      const a = p1 && p1.alive, b = p2 && p2.alive;
+      if (!a && !b) showResult('Нічия');
+      else if (!a) showResult('Гравець 2 переміг');
+      else if (!b) showResult('Гравець 1 переміг');
+    }
+  }
+
+  function explode(world, x, y, color) {
+    for (let i=0; i<24; i++) world.particles.push(new Particle(x, y, color));
+  }
+
+  // ---------------- Render ----------------
+  function render() {
+    ctx.fillStyle = C.colors.bg;
+    ctx.fillRect(0,0,vw,vh);
+
+    const W = S.world;
+    if (!W) return;
+
+    const scale = Math.min(vw / W.w, vh / W.h);
+    const ox = (vw - W.w * scale) / 2;
+    const oy = (vh - W.h * scale) / 2;
+    ctx.save();
+    ctx.translate(ox, oy);
+    ctx.scale(scale, scale);
+
+    // floor
+    ctx.fillStyle = C.colors.floor;
+    ctx.fillRect(0,0,W.w,W.h);
+
+    // walls
+    for (const w of W.walls) {
+      ctx.fillStyle = w.type === 'brick' ? C.colors.wall : C.colors.concrete;
+      ctx.fillRect(w.x, w.y, w.w, w.h);
+      ctx.strokeStyle = 'rgba(0,0,0,.25)';
+      ctx.strokeRect(w.x + .5, w.y + .5, w.w - 1, w.h - 1);
+    }
+
+    // bullets
+    for (const b of W.bullets) {
+      ctx.fillStyle = C.colors.bullet;
+      ctx.beginPath(); ctx.arc(b.x,b.y,b.r,0,Math.PI*2); ctx.fill();
+    }
+
+    // tanks
+    for (const t of W.tanks) {
+      if (!t.alive) continue;
+      drawTank(ctx, t);
+    }
+
+    // particles
+    for (const p of W.particles) {
+      ctx.fillStyle = p.color;
+      ctx.globalAlpha = Math.max(0, p.life);
+      ctx.fillRect(p.x-2, p.y-2, 4, 4);
+      ctx.globalAlpha = 1;
+    }
+
+    ctx.restore();
+
+    // HUD
+    drawHUD(W);
+    if (S.state === 'playing') drawControls();
+  }
+
+  function drawTank(g, t) {
+    g.save();
+    g.translate(t.x, t.y);
+    g.rotate(t.rot);
+    const s = t.size;
+
+    g.fillStyle = '#1a1a1a';
+    const offs = (Math.sin(t.track * 10) * 2) | 0;
+    g.fillRect(-s/2-4, -s/2, 6, s);
+    g.fillRect(s/2-2, -s/2, 6, s);
+    g.strokeStyle = '#3c3c3c';
+    for (let i=0; i<4; i++) {
+      const yy = -s/2 + i*(s/3) + offs*0.2;
+      g.beginPath(); g.moveTo(-s/2-4, yy); g.lineTo(-s/2+2, yy); g.stroke();
+      g.beginPath(); g.moveTo(s/2-2, yy); g.lineTo(s/2+4, yy); g.stroke();
+    }
+
+    g.fillStyle = t.color;
+    g.fillRect(-s/2, -s/2, s, s);
+    g.fillStyle = '#113';
+    g.fillRect(-6, -6, 12, 12);
+
+    g.strokeStyle = '#dfe8f3';
+    g.lineWidth = 4;
+    g.beginPath(); g.moveTo(0, 0); g.lineTo(s*0.62, 0); g.stroke();
+    g.restore();
+  }
+
+  function drawHUD(W) {
+    const tanks = W.tanks.filter(t => t.team !== 'enemy' || S.mode === 'single');
+    let i = 0;
+    for (const t of tanks) {
+      if (S.mode === 'single' && t.team === 'enemy') continue;
+      const x = 16 + i * 180, y = 14, w = 160, h = 14;
+      ctx.fillStyle = 'rgba(0,0,0,.45)'; ctx.fillRect(x,y,w,h);
+      ctx.fillStyle = t.color; ctx.fillRect(x,y,w * Math.max(0,t.hp) / C.tankHp, h);
+      ctx.strokeStyle = '#fff8'; ctx.strokeRect(x+.5,y+.5,w-1,h-1);
+      ctx.fillStyle = C.colors.hud;
+      const name = t.team === 'p1' ? 'P1' : t.team === 'p2' ? 'P2' : 'E';
+      ctx.fillText(`${name}: ${Math.max(0, t.hp)|0}`, x + 6, y + 11);
+      i++;
+    }
+    ctx.fillStyle = 'rgba(0,0,0,.5)';
+    roundRect(ctx, vw - 58, 10, 48, 36, 8); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.fillRect(vw-44,18,6,20); ctx.fillRect(vw-30,18,6,20);
+  }
+
+  function drawControls() {
+    const L = input.getLayout();
+    const drawJoy = (c, st) => {
+      ctx.globalAlpha = 0.3;
+      ctx.fillStyle = '#95a5b5';
+      ctx.beginPath(); ctx.arc(c.x,c.y,c.r,0,Math.PI*2); ctx.fill();
+      ctx.globalAlpha = 0.55;
+      ctx.fillStyle = '#d7e5f5';
+      ctx.beginPath(); ctx.arc(c.x + st.jx, c.y + st.jy, c.r*0.42, 0, Math.PI*2); ctx.fill();
+      ctx.globalAlpha = 1;
+    };
+    const drawFire = (c, pressed) => {
+      ctx.globalAlpha = pressed ? 0.7 : 0.35;
+      ctx.fillStyle = pressed ? '#ff8f8f' : '#ffb5b5';
+      ctx.beginPath(); ctx.arc(c.x,c.y,c.r,0,Math.PI*2); ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = '#210';
+      ctx.fillText('Вогонь', c.x - c.r*0.58, c.y + 4);
+    };
+
+    drawJoy(L.p1Joy, input.controls.p1);
+    drawFire(L.p1Fire, input.controls.p1.fire);
+    if (S.mode === 'duo') {
+      drawJoy(L.p2Joy, input.controls.p2);
+      drawFire(L.p2Fire, input.controls.p2.fire);
+    }
+  }
+
+  // ---------------- Utils ----------------
+  function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+  function lerpAngle(a,b,t){
+    const d = Math.atan2(Math.sin(b-a), Math.cos(b-a));
+    return a + d * t;
+  }
+  function roundRect(g, x, y, w, h, r) {
+    g.beginPath();
+    g.moveTo(x+r,y); g.arcTo(x+w,y,x+w,y+h,r); g.arcTo(x+w,y+h,x,y+h,r);
+    g.arcTo(x,y+h,x,y,r); g.arcTo(x,y,x+w,y,r); g.closePath();
+  }
+
+  // ---------------- Main Loop ----------------
+  let last = performance.now();
+  function loop(now) {
+    const dt = Math.min(0.033, (now - last) / 1000);
+    last = now;
+    if (S.state === 'playing') update(dt);
+    render();
+    requestAnimationFrame(loop);
+  }
+
+  showMenu();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
